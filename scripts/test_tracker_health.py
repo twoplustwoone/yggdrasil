@@ -345,6 +345,13 @@ class TrackerTests(unittest.TestCase):
         t = torrent(); t["ratio_limit"] = 1
         self.assertTrue(h.observations([t], {"a": [tracker(2, "")]})[3])
 
+    def test_unclassified_torrent_gets_until_qbit_manage_has_run_twice(self):
+        now = 1_800_000_000
+        fresh = torrent(completion_on=now - 1800); fresh["tags"] = "IPT"
+        self.assertFalse(h.observations([fresh], {"a": [tracker(2, "")]}, now=now)[3])
+        missed = torrent(completion_on=now - 3 * 3600); missed["tags"] = "IPT"
+        self.assertTrue(h.observations([missed], {"a": [tracker(2, "")]}, now=now)[3])
+
     def test_inherited_limits_require_unlimited_globals(self):
         t = torrent(); t['inactive_seeding_time_limit'] = -2
         self.assertFalse(h.observations([t], {'a':[tracker()]}, {'max_inactive_seeding_time':-1})[3])

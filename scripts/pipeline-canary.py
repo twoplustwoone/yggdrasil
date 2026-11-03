@@ -12,12 +12,13 @@ own heartbeat stays green even when it has stopped deleting anything.
   --apply    post to Discord if there are findings
 """
 import http.cookiejar, json, sqlite3, subprocess, sys, time, urllib.request, urllib.parse
-import fcntl, os, tempfile
+import fcntl, hashlib, os, tempfile
 from tracker_health import (QBM_DIGEST, STALE_SECONDS, acknowledge, advance,
     config_problems, initial_state, last_scan, load_state, observations,
     pipeline_signature, port_forward_problem, private_torrent, sanitize, save_state)
 from datetime import datetime, timezone
-from host_checks import backup_problem, foreign_process, plex_update_problem, release_update_problem
+from host_checks import (PROGRAM_DIRS, backup_problem, backup_running, foreign_process, plex_update_problem,
+    release_update_problem)
 from ipt_credit import (CreditUnavailable, fetch_required, with_stored_credentials,
     identity_map, advance_credit, fetch_account_ratio)
 from torrent_retirement import (advance_retirement, initial_retirement, intentional_stops, pending_stop_errors,
@@ -110,6 +111,24 @@ def age_days(ts):
     if d.tzinfo is None: d = d.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - d).total_seconds() / 86400
 
+def backup_unit():
+    """(Result, last exit, ActiveState, current run's start) of the nightly backup; times unix."""
+    unit = dict(l.split("=", 1) for l in sh("systemctl", "show", "plex-config-backup.service", "-p", "Result",
+                "-p", "ExecMainExitTimestamp", "-p", "ActiveState", "-p", "ExecMainStartTimestamp",
+                "--timestamp=unix").splitlines() if "=" in l)
+    stamp = lambda k: int(unit[k].lstrip("@")) if unit.get(k, "").lstrip("@").isdigit() else None
+    return unit.get("Result"), stamp("ExecMainExitTimestamp"), unit.get("ActiveState"), stamp("ExecMainStartTimestamp")
+
+# The nightly backup stops Plex and Kuma for a few minutes; a run then reports its
+# own failed checks and cannot reach Kuma or Discord. Skip it unless the backup is stuck.
+try:
+    _, _, state, started = backup_unit()
+    if backup_running(state, started, time.time()):
+        print("nightly backup in progress; skipping this run")
+        sys.exit(0)
+except subprocess.CalledProcessError:
+    pass  # the backup check below reports an unreadable unit
+
 findings = []
 
 # 1. health errors reported by the apps themselves
@@ -192,7 +211,13 @@ def foreign_processes():
                 continue  # exited between listing and reading
             try: exe = os.readlink("/proc/%s/exe" % pid)
             except OSError: exe = None
-            why = foreign_process(exe, uid, comm)
+            digest = None
+            if exe and not exe.startswith(PROGRAM_DIRS):
+                try:  # the binary actually running, even if the file was since replaced
+                    with open("/proc/%s/exe" % pid, "rb") as f: digest = hashlib.sha256(f.read()).hexdigest()
+                except OSError:
+                    pass
+            why = foreign_process(exe, uid, comm, digest)
             if why: found[(name, pid)] = "%s %s" % (name, why)
     return found
 try:
@@ -222,10 +247,8 @@ try:
 except Exception as e:
     monitor_errors.append("Jellyfin update check failed: %s" % type(e).__name__)
 try:
-    unit = dict(l.split("=", 1) for l in sh("systemctl", "show", "plex-config-backup.service", "-p", "Result",
-                "-p", "ExecMainExitTimestamp", "--timestamp=unix").splitlines() if "=" in l)
-    stamp = unit.get("ExecMainExitTimestamp", "").lstrip("@")
-    problem = backup_problem(unit.get("Result"), int(stamp) if stamp.isdigit() else None, time.time())
+    result, finished, state, started = backup_unit()
+    problem = backup_problem(result, finished, time.time(), state, started)
     if problem: findings.append(problem)
 except Exception as e:
     monitor_errors.append("backup check failed: %s" % type(e).__name__)
@@ -440,6 +463,8 @@ except Exception as e:
     monitor_errors.append("torrent monitoring failed: %s" % type(e).__name__)
 
 findings.extend(sorted(set(monitor_errors)))
+# A season pack is one queue record per episode, each producing the same line.
+findings = list(dict.fromkeys(findings))
 
 def heartbeat(msg, status="up"):
     """Tell Kuma the canary ran. A failure here must never mask the real result."""

@@ -18,19 +18,30 @@ PROGRAM_DIRS = ("/usr/bin/", "/usr/sbin/", "/usr/local/bin/", "/bin/", "/sbin/",
 # the s6 supervision tree, shells, and the healthchecks docker runs as root.
 ROOT_COMMANDS = {"s6-svscan", "s6-supervise", "s6-linux-init-s", "s6-ipcserverd", "s6-rc", "s6-log",
                  "bash", "sh", "sleep", "busybox", "docker-init", "curl", "wget"}
+# Programs Plex downloads into /config at runtime, matched by content so a file
+# planted at the same path still alerts. Each was verified against downloads.plex.tv:
+# the zip's sha256 against plex.tv's codec manifest, then the binary inside it.
+VERIFIED_BINARIES = {
+    "104c46812636118342920c9612c6d6d5bc76c5fd322cb95141ac8c1f800f385c":
+        "Plex EasyAudioEncoder 6a4213e165f8ac3d108a346e linux-x86_64 (verified 2026-11-02)",
+}
 PLEX_MAX_IMAGE_DAYS = 21   # linuxserver rebuilds the image weekly
 # Jellyfin's image changes only on a release, with gaps of up to six months, so its
 # age says nothing. Compare with the registry instead; Watchtower pulls daily.
 RELEASE_GRACE_DAYS = 3
 BACKUP_MAX_AGE_HOURS = 36  # nightly job, plus slack
+BACKUP_MAX_RUN_HOURS = 2   # runs take 1-18 minutes
 
 
-def foreign_process(exe, uid, comm):
-    """Why a container process looks planted, or None. `exe` is None when unreadable."""
+def foreign_process(exe, uid, comm, digest=None):
+    """Why a container process looks planted, or None. `exe` is None when unreadable;
+    `digest` is the sha256 of the running binary, when the canary could read it."""
     if exe is not None:
         if exe.endswith(" (deleted)"):
             return "runs a deleted program %s" % exe[:-len(" (deleted)")]
-        return None if exe.startswith(PROGRAM_DIRS) else "runs %s" % exe
+        if exe.startswith(PROGRAM_DIRS) or digest in VERIFIED_BINARIES:
+            return None
+        return "runs %s (sha256 %s)" % (exe, digest) if digest else "runs %s" % exe
     if uid == 0:
         return None if comm in ROOT_COMMANDS else "runs root process %r" % comm
     return "runs an unreadable process %r as uid %s" % (comm, uid)
@@ -61,8 +72,21 @@ def release_update_problem(name, image_ref, local_digests, latest_digest, latest
     return None
 
 
-def backup_problem(result, finished, now):
-    """Why the nightly config backup cannot be trusted, or None. `finished` is unix time."""
+def backup_running(state, started, now):
+    """Whether the nightly backup is mid-run and not overdue. It stops Plex and Kuma
+    for a few minutes, so other checks run in that window fail by themselves."""
+    return state == "activating" and started is not None and now - started < BACKUP_MAX_RUN_HOURS * 3600
+
+
+def backup_problem(result, finished, now, state="inactive", started=None):
+    """Why the nightly config backup cannot be trusted, or None. Times are unix;
+    `state` and `started` are the unit's ActiveState and current run's start."""
+    if state == "activating":
+        # systemd blanks the last exit time while a run is in progress.
+        if backup_running(state, started, now):
+            return None
+        return "nightly config backup has been running since %s" % (
+            "?" if started is None else datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M"))
     when = "never" if finished is None else datetime.fromtimestamp(finished).strftime("%Y-%m-%d %H:%M")
     if finished is None or now - finished > BACKUP_MAX_AGE_HOURS * 3600:
         return "nightly config backup has not finished since %s" % when

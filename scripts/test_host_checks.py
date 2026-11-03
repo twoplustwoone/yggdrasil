@@ -29,6 +29,13 @@ class ForeignProcessTest(unittest.TestCase):
     def test_unreadable_non_root_process_is_flagged(self):
         self.assertIn("uid 911", hc.foreign_process(None, 911, "db"))
 
+    def test_verified_plex_download_passes_by_content(self):
+        eae = "/config/Library/Application Support/Plex Media Server/Codecs/EasyAudioEncoder-x/EasyAudioEncoder"
+        good = "104c46812636118342920c9612c6d6d5bc76c5fd322cb95141ac8c1f800f385c"
+        self.assertIsNone(hc.foreign_process(eae, 1000, "EasyAudioEncoder", good))
+        # A planted file at the same path is still flagged, with its digest to check.
+        self.assertIn("sha256 deadbeef", hc.foreign_process(eae, 1000, "EasyAudioEncoder", "deadbeef" * 8))
+
 
 class PlexUpdateTest(unittest.TestCase):
     now = datetime(2026, 10, 28, tzinfo=timezone.utc)
@@ -78,6 +85,16 @@ class BackupTest(unittest.TestCase):
     def test_stopped_schedule_is_flagged_even_after_a_success(self):
         self.assertIn("has not finished since", hc.backup_problem("success", self.now - 40 * 3600, self.now))
         self.assertIn("never", hc.backup_problem("success", None, self.now))
+
+    def test_run_in_progress_passes_though_systemd_blanks_its_exit_time(self):
+        # 2026-10-28..11-02: every run caught mid-backup read "not finished since never".
+        self.assertIsNone(hc.backup_problem("success", None, self.now, "activating", self.now - 600))
+        self.assertTrue(hc.backup_running("activating", self.now - 600, self.now))
+
+    def test_run_past_its_window_is_flagged_as_stuck(self):
+        self.assertIn("running since", hc.backup_problem("success", None, self.now, "activating", self.now - 3 * 3600))
+        self.assertFalse(hc.backup_running("activating", self.now - 3 * 3600, self.now))
+        self.assertFalse(hc.backup_running("inactive", self.now - 600, self.now))
 
 
 if __name__ == "__main__": unittest.main()

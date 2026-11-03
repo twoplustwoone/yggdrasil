@@ -5,6 +5,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,7 @@ QBM_VERSION = "4.13.0"
 QBM_DIGEST = "sha256:ea04167f627e506b3691304f4c639a52c05584cc9aea4af7ec87d4ed1299e7f5"
 IPT_DOMAINS = ("stackoverflow.tech", "empirehost.me", "bgp.technology", "iptorrents.com")
 STALE_SECONDS = 90 * 60
+CLASSIFY_GRACE_SECONDS = 2 * 60 * 60  # qbit_manage runs hourly (QBT_SCHEDULE=60)
 
 
 def sanitize(value, limit=180):
@@ -117,11 +119,12 @@ def category(message):
     return "tracker unavailable"
 
 
-def observations(torrents, trackers, preferences=None, intentional=None):
+def observations(torrents, trackers, preferences=None, intentional=None, now=None):
     """Use qBM tags, with IPT-only status checks to cover its any-tracker rule."""
     groups, healthy, inventory, problems = {}, set(), {}, []
     preferences = preferences or {}
     intentional = intentional or set()
+    now = time.time() if now is None else now
     def unlimited(t, field, global_field):
         value = t.get(field, -1)
         return value == -1 or value == -2 and preferences.get(global_field) == -1
@@ -130,7 +133,8 @@ def observations(torrents, trackers, preferences=None, intentional=None):
         private = private_torrent(t)
         if private:
             inventory[h] = sanitize(t["name"])
-            if t.get("progress") == 1 and ("private" not in tags(t)
+            # qbit_manage classifies new torrents on its hourly run; flag only what it missed twice.
+            if t.get("progress") == 1 and now - t.get("completion_on", 0) >= CLASSIFY_GRACE_SECONDS and ("private" not in tags(t)
                     or not unlimited(t, "ratio_limit", "max_ratio")
                     or not unlimited(t, "seeding_time_limit", "max_seeding_time")
                     or not unlimited(t, "inactive_seeding_time_limit", "max_inactive_seeding_time")):
