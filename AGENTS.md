@@ -120,6 +120,11 @@ checks structurally cannot: everything green while nothing is delivered. It
 heartbeats an Uptime Kuma push monitor on every run, so its own death is
 detectable.
 
+The service runs **copies** in the home folder (`/home/twoplustwoone/pipeline-canary.py`
+and the modules it imports), not the checkout, so `git pull` alone deploys nothing.
+After pulling, copy each changed script over its home copy, e.g.
+`install -m 644 ~/yggdrasil/scripts/host_checks.py ~/host_checks.py`.
+
 The canary also looks for intrusion tells (`scripts/host_checks.py`). It flags:
 
 - any process in the exposed containers running from outside a root-owned program folder
